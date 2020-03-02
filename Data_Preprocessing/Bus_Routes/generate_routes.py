@@ -1,9 +1,10 @@
 import pandas as pd
 import numpy as np
 from collections import defaultdict
-from pyproj import Proj,transform
+from pyproj import Proj,transform, Transformer
 from shapely.geometry import Point
 NUM_DIFFERENT_STOPS_ALLOWED = 3
+TRANSFORMER = Transformer.from_crs('EPSG:4326', 'EPSG:2157', always_xy=True)
 
 
 def devide_to_trips(df):
@@ -73,7 +74,8 @@ def clean_route(route_df):
 
 def transform_coordinates(longitude,latitude):
     # transforms long, latt to Irish coordinate points.
-    trans = transform(Proj(init='EPSG:4326'), Proj(init='EPSG:2157'), longitude, latitude)  # longitude, latitude
+    # trans = transform(Proj(init='EPSG:4326'), Proj(init='EPSG:2157'), longitude, latitude)  # longitude, latitude
+    trans = TRANSFORMER.transform(longitude, latitude)
     return Point(trans[0],trans[1])
 
 
