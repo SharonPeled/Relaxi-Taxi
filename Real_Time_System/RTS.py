@@ -22,8 +22,8 @@ class Route:
     # Represents a general route of a bus line
     def __init__(self, route_df):
         self.direction_ = route_df.iloc[0]["direction_id"]
-        self.routeId_ = route_df.iloc[0]["route_id"]
-        self.line_ = route_df.iloc[0]["route_short_name"]
+        self.routeId_ = route_df.iloc[0]["trip_id"]
+        self.line_ = route_df.iloc[0]["line_id"]
         self.route_ = route_df[["stop_sequence", "stop_id", "stop_point", "dist_traveled"]]
         self.linestring_ = LineString(list(self.route_["stop_point"]))
         self.stops_dist_from_beg_ = [self.linestring_.project(Point(coords)) for coords in self.linestring_.coords]
@@ -77,14 +77,17 @@ class Routes:
     def __init__(self, routes_filename):
         df_trips = pd.read_csv(routes_filename)
         df_trips["stop_point"] = df_trips["stop_point"].apply(lambda elem: wkt.loads(elem))
-        self.routes_ = defaultdict(lambda: list())  # key: line, value: list of possible routes
-        for attrs, trip_df in df_trips.groupby(["route_id", "route_short_name", "direction_id"]):
-            (route_id, line, direction) = attrs
-            self.routes_[line].append(Route(trip_df))
-        print(list(self.routes_.keys()))
+        self.trips_ = defaultdict(lambda: [[], []])  # key: line, value: list of 2 lists of dfs (one for each direction)
+        for attrs, trip_df in df_trips.groupby(["line_id", "direction_id", "trip_id"]): # trip_id is the full identifier !!
+            (line_id, direction_id, trip_id) = attrs
+            self.trips_[line_id][direction_id].append(Route(trip_df))
+        print(list(self.trips_.keys()))
 
-    def __getitem__(self, line):
-        return self.routes_[line]
+    def __getitem__(self, line, direction = -1):
+        if direction not in [0,1]:
+            return self.trips_[line][0] + self.trips_[line][1]
+        else:
+            return self.trips_[line][direction]
 
 
 class BusDrive:
@@ -203,7 +206,7 @@ class BusDrive:
     def isAssignedRoute(self):
         return self.route_ != UNASSIGNED
 
-    def numValid(self):
+    def numValidPings(self):
         if self.route_ == UNASSIGNED:
             return None
         return self.pings_df_[self.pings_df_["valid_ping"] == 1].shape[0]
@@ -267,7 +270,7 @@ class RTS:
             drive = self.active_drives_[attrs]
             stats_dic["drive"].append(attrs)
             stats_dic["num_pings"].append(len(drive))
-            stats_dic["num_valid_pings"].append(drive.numValid())
+            stats_dic["num_valid_pings"].append(drive.numValidPings())
             stats_dic["route_score"].append(drive.getRouteScore())
             stats_dic["found_route"].append(drive.isAssignedRoute())
 
@@ -279,7 +282,7 @@ if __name__ == '__main__':
     stream["round_timestamp"] = stream["timestamp"].apply(lambda elem:elem.replace(second=0))
     stream["point"] = stream["point"].apply(lambda elem : wkt.loads(elem))
     # starting the RTS
-    rts = RTS("..//Data_Preprocessing//Bus_Routes//clean_routes.csv")
+    rts = RTS("..//Data_Preprocessing//Bus_Routes//clean_trips_full.csv")
     df_lists = list(stream.groupby(["round_timestamp"]))
     df_lists.sort(key=lambda elem:elem[0])
     num_hours = 5
@@ -289,6 +292,6 @@ if __name__ == '__main__':
         rts.recieveDataStream(group_df)
         if i == 60*num_hours:
             break
-    BusDrive.df_full_drives.reset_index(drop=True).to_csv("drives_sample_V4.csv",index=False)
+    BusDrive.df_full_drives.reset_index(drop=True).to_csv("drives_sample_V5.csv",index=False)
     print("FINISH")
 
