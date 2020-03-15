@@ -8,7 +8,6 @@ def system(location,radius,timestamp):
     return result
 
 def getmap(coordinates):
-
     webbrowser.open("plot_data.html")
 
 def submit(button):

@@ -5,6 +5,10 @@ from shapely.geometry import Point
 from shapely.geometry import LineString
 from shapely import wkt
 from datetime import datetime, timedelta
+from Data_Preprocessing.Bus_Routes.generate_routes import transform_coordinates
+import json
+import warnings
+warnings.filterwarnings('ignore')
 
 pd.set_option('display.max_columns', 500)
 
@@ -211,22 +215,41 @@ class BusDrive:
             return None
         return self.pings_df_[self.pings_df_["valid_ping"] == 1].shape[0]
 
+    def distanceTraveled(self):
+        return self.route_.getProjectedPoints([self.last_valid_ping_["point"]])["dist_traveled"][0]
+
+
 
 class RTS:
-    def __init__(self, routes_filename):
+    def __init__(self,operating_hour=(8,22),save_drives=False):
         # Loading routes to identify and monitor
-        self.routes_ = Routes(routes_filename)
+        self.routes_ = Routes("..//Data_Preprocessing//Bus_Routes//clean_trips_full.csv")
         self.active_drives_ = {}
         self.system_time_ = datetime(2017, 1, 1, 0, 0)  # min system time
+        self.operating_hour_ = operating_hour
+        BusDrive.save_drives = save_drives
+        self.save_drive_ = save_drives
+        with open('..//Data_Preprocessing//Stops_Lines_Object//stops_to_lines.json', 'r') as fp:
+            self.stops_to_lines_obj_ = json.load(fp)
 
-    def recieveDataStream(self, pings_df):
-        self.system_time_ = max(self.system_time_, max(pings_df["timestamp"]))
-        for attrs, drive_pings_df in pings_df.groupby(["lineId", "vehicleId"]):
-            (line_id, vehicle_id) = attrs
-            if (line_id, vehicle_id) in self.active_drives_.keys():
-                self.active_drives_[(line_id, vehicle_id)].addPings(drive_pings_df)
-            else:
-                self.active_drives_[(line_id, vehicle_id)] = BusDrive(self.routes_, drive_pings_df)
+
+    def recieveDataStream(self, pings_chunk):
+        pings_df = pd.concat(pings_chunk)
+        # filtering pings outside operation hours
+        pings_df = pings_df[pings_df.apply(lambda row:self.isInOperationHours(row),axis=1)]
+        if not pings_df.empty:
+            pings_df["point"] = pings_df.apply(
+                lambda row: transform_coordinates(row["longitude"], row["latitude"]), axis=1)
+            self.system_time_ = max(self.system_time_, max(pings_df["timestamp"]))
+            for attrs, drive_pings_df in pings_df.groupby(["lineId", "vehicleId"]):
+                (line_id, vehicle_id) = attrs
+                if (line_id, vehicle_id) in self.active_drives_.keys():
+                    self.active_drives_[(line_id, vehicle_id)].addPings(drive_pings_df)
+                else:
+                    self.active_drives_[(line_id, vehicle_id)] = BusDrive(self.routes_, drive_pings_df)
+        self.removeNonActiveDrives()
+
+    def removeNonActiveDrives(self):
         keys_to_remove = []
         for drive_key, drive in self.active_drives_.items():
             if drive.isDriveEnded(self.system_time_):
@@ -234,6 +257,10 @@ class RTS:
         self.removeDrives(keys_to_remove)
         self.validateVehicleSingularity()
         self.printSystemState()
+
+    def isInOperationHours(self,row):
+        return row["timestamp"].hour >= self.operating_hour_[0] \
+               and row["timestamp"].hour < self.operating_hour_[1]
 
     def validateVehicleSingularity(self):
         vehicle_dic = defaultdict(lambda: [])
@@ -246,17 +273,17 @@ class RTS:
 
     def removeDuplicateVehiclesDrives(self, vehicle_id, line_list):
         keys_to_remove = []
-        last_activity_time = -np.inf
+        last_activity_time = datetime(2017, 1, 1, 0, 0)  # min system time
         last_activity_key_drive = None
         for line_id in line_list:
-            drive = self.active_drives_[(vehicle_id, line_id)]
+            drive = self.active_drives_[(line_id,vehicle_id)]
             if len(drive) < MIN_NUM_OF_PINGS:  # allow for small drives to stay for now
                 continue
             # keep only the most updated drive
             if last_activity_time < drive.lastActivity():
                 keys_to_remove.append(last_activity_key_drive) if last_activity_key_drive != None else None
                 last_activity_time = drive.lastActivity()
-                last_activity_key_drive = (vehicle_id, line_id)
+                last_activity_key_drive = (line_id,vehicle_id)
         self.removeDrives(keys_to_remove)
 
     def removeDrives(self, drive_keys):
@@ -274,24 +301,21 @@ class RTS:
             stats_dic["route_score"].append(drive.getRouteScore())
             stats_dic["found_route"].append(drive.isAssignedRoute())
 
+    def get_active_drives_by_line(self):
+        active_lines = defaultdict(lambda:[])
+        for line_id, vehicle_id in self.active_drives_.keys():
+            active_lines[line_id].append(vehicle_id)
+        return active_lines
 
-if __name__ == '__main__':
-    # getting the stream data
-    stream = pd.read_csv("..//Data//Samples//3days3lines_adjusted.csv",dtype={"lineId":str,"vehicleId":str})
-    stream["timestamp"] = pd.to_datetime(stream["timestamp"])
-    stream["round_timestamp"] = stream["timestamp"].apply(lambda elem:elem.replace(second=0))
-    stream["point"] = stream["point"].apply(lambda elem : wkt.loads(elem))
-    # starting the RTS
-    rts = RTS("..//Data_Preprocessing//Bus_Routes//clean_trips_full.csv")
-    df_lists = list(stream.groupby(["round_timestamp"]))
-    df_lists.sort(key=lambda elem:elem[0])
-    num_hours = 5
-    BusDrive.save_drives = True
-    for i, (time,group_df) in enumerate(df_lists):
-        print("index: {} , System time: {}".format(i,rts.system_time_))
-        rts.recieveDataStream(group_df)
-        if i == 60*num_hours:
-            break
-    BusDrive.df_full_drives.reset_index(drop=True).to_csv("drives_sample_V5.csv",index=False)
-    print("FINISH")
+    def recieveRequest(self,req):
+        active_lines = self.get_active_drives_by_line()
+        for stop_id in req["stop_id"]:
+            for line, dist in self.stops_to_lines_obj_[stop_id]:
+                for vehicle_id in active_lines[line]:
+                    bus_drive = self.active_drives_[(line, vehicle_id)]
+                    if not bus_drive.isAssignedRoute():
+                        continue
 
+    def close(self):
+        if self.save_drive_:
+            BusDrive.df_full_drives.to_csv("full_drive.csv" , index=False)
